@@ -7,7 +7,32 @@ nunjucks.configure({ autoescape: true });
 
 function checkLiquid(moduleId, websiteId, template, data) {
     const engine = new Liquid();
-    return engine.parseAndRenderSync(template, data);
+
+// Define the 'match' filter
+    engine.registerFilter('match', (input, patternWithFlags) => {
+        // Extract the pattern and flags (if present)
+        const regexPattern = patternWithFlags.replace(/\\+"/g, '"');  // Unescape quotes
+        const flags = regexPattern.match(/\/([a-z]*)$/);
+
+        // Create a regex object from the string
+        const regex = new RegExp(regexPattern.replace(/\/[a-z]*$/, ''), flags ? flags[1] : '');  // Get regex and flags
+
+        return input.match(regex);  // Matches and returns the array of matches or null
+    });
+
+    // Define the 'test' filter
+    engine.registerFilter('test', (input, patternWithFlags) => {
+        // Extract the pattern and flags (if present)
+        const regexPattern = patternWithFlags.replace(/\\+"/g, '"');  // Unescape quotes
+        const flags = regexPattern.match(/\/([a-z]*)$/);
+
+        // Create a regex object from the string
+        const regex = new RegExp(regexPattern.replace(/\/[a-z]*$/, ''), flags ? flags[1] : '');  // Get regex and flags
+
+        return regex.test(input);  // Returns true or false
+    });
+
+    return engine.parseAndRenderSync(template, data)
 }
 
 function checkNunjucks(template, data) {
@@ -30,22 +55,61 @@ function convertTemplate(template) {
     convertedTemplate = convertedTemplate.replace(/\$currentUrl/g,'_currentUrl');
 
     // Fix elif statement
-    convertedTemplate = convertedTemplate.replace(/\elif/g,'elseif');
+    convertedTemplate = convertedTemplate.replace(/\elif/g,'elsif');
 
     // Fix set statement
     convertedTemplate = convertedTemplate.replace(/ set /g,' assign ');
 
     // Fix replace filter
-    convertedTemplate = convertedTemplate.replace(/replace\((.*?),\s*(.*?)\)/g, "replace: $1, $2")
+    convertedTemplate = convertedTemplate.replace(/replace\s*\((.*?),\s*(.*?)\)/g, "replace: $1, $2");
 
     // Fix truncate filter
-    convertedTemplate = convertedTemplate.replace(/truncate\((\d+)\)/g, "truncate: $1");
+    convertedTemplate = convertedTemplate.replace(/truncate\s*\(\s*(\d+)\s*\)/g, "truncate: $1");
 
     // Fix length => size
     convertedTemplate = convertedTemplate.replace(/\|length/g, "|size");
 
     // Fix trim
     convertedTemplate = convertedTemplate.replace(/\|trim/g, "|strip");
+
+
+    // Transform regex patterns (r/.../flags) into strings
+    // (This fixes about 25/81 regexes)
+    convertedTemplate = convertedTemplate.replace(/r\/(.*?)\/([a-z]*)/g, (_, pattern, flags) => {
+        // Escape special characters and double quotes inside the pattern
+        const escapedPattern = pattern.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+        // If there are flags, we add them to the string as a part of the pattern
+        const patternWithFlags = `"${escapedPattern}"`;  // Only pattern as a string
+
+        return patternWithFlags;  // Return the transformed string without flags
+    });
+
+    // Replace .match(regex) with | match: regex
+    convertedTemplate = convertedTemplate.replace(/\.match\((.*?)\)/g, '| match: $1');
+
+    // Replace .test(regex) with | test: regex
+    convertedTemplate = convertedTemplate.replace(/\.test\((.*?)\)/g, '| test: $1');
+
+    convertedTemplate = convertedTemplate.replace(/\.slice\(-1\)\[0]/g, '.last')
+
+    // Change "in" operator
+    convertedTemplate = convertedTemplate.replace(/(['"].*?['"])\s+in\s+([\w|.\s]+)/g, "$2 contains $1");
+
+    // Change "not in" operator
+    convertedTemplate = convertedTemplate.replace(/(['"].*?['"])\s+not\s+in\s+([\w|.\s]+)/g, "$2 not contains $1");
+
+    /**
+     * We also have many other small issues:
+     *
+     * - String methods don't exist mainly in liquid: no splice/slice/endsWith etc...
+     * - Liquid doesn't do on the fly logical operator evaluation in an if statement for instance, you'll have to assign the result first
+     * - Liquid doesn't accept complex regEx with flags and doesn't use regEx r/ syntax
+     * - Can only do simple logical operators combination
+     * - String concatenatino doesn't work in liquid (string + string)
+     * - mathematical operations are not possible, must be done thru explicit filters
+      */
+
 
     return convertedTemplate
 }
@@ -112,6 +176,8 @@ fs.readFile(filePath, 'utf8', (err, file) => {
         var failReplace = 0;
         var failTrim = 0;
         var failLength = 0;
+        var failRegex = 0;
+        var failSlice = 0;
         var csv = parseCSV(file);
         var totalTemplates = 0;
         csv.forEach(datum => {
@@ -161,11 +227,15 @@ fs.readFile(filePath, 'utf8', (err, file) => {
                                     if (convertedTemplate.includes("|length") || convertedTemplate.includes("| length")) {
                                         failLength++;
                                     }
-
+                                } else if (template.includes(".test(") || template.includes(".match(")) {
+                                    failRegex++;
                                     console.warn("LIQUID FILTER ERROR", e, convertedTemplate);
+                                } else if (template.includes(".slice(-1)[0]")) {
+                                    failSlice++;
                                 } else {
                                     failedOther++;
-                                    // console.warn("LIQUID ERROR", e, template);
+                                    console.log("OG TEMPLATE", template)
+                                    console.warn("LIQUID ERROR", e, template);
                                 }
                                 failLiquid++;
                                 results[datum.website_id] = results[datum.website_id] ?? {total:0};
@@ -211,6 +281,8 @@ fs.readFile(filePath, 'utf8', (err, file) => {
         console.log("FAILED because of trim filter: ", failTrim);
         console.log("FAILED because of length filter: ", failLength);
         console.log("FAILED because of other", failedOther);
+        console.log("FAILED because of regex", failRegex);
+        console.log("FAILED because of slice", failSlice);
         console.log(chalk.bgWhiteBright("                    "));
         console.log(chalk.red("FAILED UNKNOWN REASON"), a);
         console.log(chalk.bgWhiteBright("                    "));
